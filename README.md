@@ -1,4 +1,4 @@
-# Inverted Pendulum — LQR vs MPC
+# Inverted Pendulum — PID vs LQR vs MPC
 
 A browser-native, zero-dependency control-theory demo.
 Push the pole with your mouse and watch two classical controllers fight to keep it upright.
