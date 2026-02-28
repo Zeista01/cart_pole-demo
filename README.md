@@ -5,7 +5,7 @@ Push the pole with your mouse and watch three classical controllers fight to kee
 
 ## 🌐 Live Demo
 
-**[YOUR_GITHUB_PAGES_URL_HERE]**
+**[[TEST IT OUT](https://zeista01.github.io/cart_pole-demo/)]**
 
 ---
 
