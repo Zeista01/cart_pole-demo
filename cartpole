@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inverted Pendulum — LQR vs MPC</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#020208; }
+canvas { display:block; cursor:crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════
+//  PARAMETERS
+// ════════════════════════════════════════════════════════════
+const P = {
+  M: 1.0,        // cart mass (kg)
+  m: 0.3,        // pole mass (kg)
+  L: 0.6,        // pole half-length (m)
+  g: 9.81,
+  b: 0.1,        // cart friction
+  trackLen: 2.7, // half-track length (m)
+  Umax: 30,      // max force (N)
+  dtInner: 0.002,// inner-loop timestep (500 Hz)
+  // LQR
+  Qlqr: [1.0, 0.8, 20.0, 2.5],
+  Rlqr: 0.01,
+  // MPC
+  Nh: 22, Ni: 12, dtMpc: 0.025,
+  Qmpc: [1.0, 0.8, 28.0, 3.0],
+  Rmpc: 0.01,
+  // Interaction
+  pushMag: 22,
+  pushDur: 0.22,
+};
+
+// ════════════════════════════════════════════════════════════
+//  CANVAS
+// ════════════════════════════════════════════════════════════
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+let W, H, SX, SY, SC; // screen dims, center, scale (px/m)
+
+function onResize() {
+  W = cvs.width  = window.innerWidth;
+  H = cvs.height = window.innerHeight;
+  SX = W * 0.5;
+  SY = H * 0.56;
+  SC = Math.min(W / 8, H / 5.5);
+}
+window.addEventListener('resize', onResize);
+onResize();
+
+function ws(mx, my) { return [SX + mx*SC, SY - my*SC]; }
+
+// ════════════════════════════════════════════════════════════
+//  PHYSICS  — Lagrangian cart-pole equations
+//  State: [x, xdot, theta, thetadot]   theta=0 → upright
+// ════════════════════════════════════════════════════════════
+function deriv([x, xd, th, thd], u) {
+  const {M,m,L,g,b} = P;
+  const st=Math.sin(th), ct=Math.cos(th);
+  const D = M + m*st*st;
+  const xdd  = (u - b*xd + m*L*thd*thd*st + m*g*st*ct) / D;
+  const thdd = (-(M+m)*g*st - ct*(u - b*xd + m*L*thd*thd*st)) / (L*D);
+  return [xd, xdd, thd, thdd];
+}
+
+function rk4(s, u, dt) {
+  const k1=deriv(s,u);
+  const s2=s.map((v,i)=>v+.5*dt*k1[i]);
+  const k2=deriv(s2,u);
+  const s3=s.map((v,i)=>v+.5*dt*k2[i]);
+  const k3=deriv(s3,u);
+  const s4=s.map((v,i)=>v+dt*k3[i]);
+  const k4=deriv(s4,u);
+  return s.map((v,i)=>v+(dt/6)*(k1[i]+2*k2[i]+2*k3[i]+k4[i]));
+}
+
+// ════════════════════════════════════════════════════════════
+//  LQR — Continuous-time Algebraic Riccati Equation solver
+//  Integrate: dP/dt = A'P + PA − (1/R)·PBB'P + Q → steady state
+// ════════════════════════════════════════════════════════════
+function solveLQR() {
+  const {M,m,L,g,b} = P;
+  const Q=P.Qlqr, R=P.Rlqr;
+  const A = [
+    [0, 1, 0, 0],
+    [0, -b/M, m*g/M, 0],
+    [0, 0, 0, 1],
+    [0, b/(L*M), -(M+m)*g/(L*M), 0]
+  ];
+  const Bv = [0, 1/M, 0, -1/(L*M)];
+
+  // init P = diag(Q)
+  const Pm = Array.from({length:4}, (_,i) => {
+    const r = new Float64Array(4); r[i]=Q[i]; return r;
+  });
+  const dt = 0.005;
+  for(let it=0; it<18000; it++) {
+    const PB = [0,0,0,0];
+    for(let i=0;i<4;i++) for(let j=0;j<4;j++) PB[i]+=Pm[i][j]*Bv[j];
+    const dP = Array.from({length:4},()=>new Float64Array(4));
+    let norm=0;
+    for(let i=0;i<4;i++) for(let j=0;j<4;j++) {
+      let v = Q[i]*(i===j?1:0);
+      for(let k=0;k<4;k++) v += A[k][i]*Pm[k][j] + Pm[i][k]*A[k][j];
+      v -= PB[i]*PB[j]/R;
+      dP[i][j]=v; norm+=v*v;
+    }
+    for(let i=0;i<4;i++) for(let j=0;j<4;j++) Pm[i][j]+=dt*dP[i][j];
+    if(it>300 && Math.sqrt(norm)<1e-9) break;
+  }
+  // K = R⁻¹ B' P
+  const K = new Float64Array(4);
+  for(let j=0;j<4;j++) for(let i=0;i<4;i++) K[j]+=Bv[i]*Pm[i][j]/R;
+  console.log('LQR K =', Array.from(K).map(v=>v.toFixed(3)).join(', '));
+  return K;
+}
+
+// ════════════════════════════════════════════════════════════
+//  MPC — Receding-horizon gradient-descent shooting
+// ════════════════════════════════════════════════════════════
+const mpcU = new Float64Array(P.Nh);
+
+function mpcCost(s0, U) {
+  let s=[...s0]; let J=0;
+  const {Nh,dtMpc,Umax,Qmpc,Rmpc}=P;
+  for(let k=0;k<Nh;k++) {
+    const u=Math.max(-Umax,Math.min(Umax,U[k]));
+    const [x,,th,thd]=s;
+    J+=Qmpc[0]*x*x + Qmpc[2]*th*th + Qmpc[3]*thd*thd + Rmpc*u*u;
+    s=rk4(s,u,dtMpc);
+  }
+  const [x,,th,thd]=s; const Qf=15;
+  J+=Qf*(Qmpc[0]*x*x+Qmpc[2]*th*th+Qmpc[3]*thd*thd);
+  return J;
+}
+
+function mpcStep(s0) {
+  const {Nh,Ni,Umax}=P;
+  mpcU.copyWithin(0,1);
+  mpcU[Nh-1]=mpcU[Nh-2];
+  const eps=0.05;
+  for(let it=0;it<Ni;it++) {
+    const J0=mpcCost(s0,mpcU);
+    const lr=0.45/(1+0.04*it);
+    for(let k=0;k<Nh;k++) {
+      mpcU[k]+=eps;
+      const dJ=(mpcCost(s0,mpcU)-J0)/eps;
+      mpcU[k]-=eps+lr*dJ;
+      mpcU[k]=Math.max(-Umax,Math.min(Umax,mpcU[k]));
+    }
+  }
+  return mpcU[0];
+}
+
+function mpcPredict(s0) {
+  let s=[...s0]; const traj=[{x:s[0],th:s[2]}];
+  const {Nh,dtMpc,Umax}=P;
+  for(let k=0;k<Nh;k++) {
+    const u=Math.max(-Umax,Math.min(Umax,mpcU[k]));
+    s=rk4(s,u,dtMpc);
+    traj.push({x:s[0],th:s[2]});
+  }
+  return traj;
+}
+
+// ════════════════════════════════════════════════════════════
+//  GAME STATE
+// ════════════════════════════════════════════════════════════
+const sim = {
+  s: [0,0,0.08,0], u:0,
+  mode:'LQR', lqrK:null,
+  alive:true, time:0, balTime:0,
+  pushU:0, pushTimer:0,
+  challenge:false, challengeTimer:3,
+  history:[], maxHist:400,
+  lqrBest:0, mpcBest:0,
+  flash:0, // flash alpha on challenge push
+};
+const BTNS={};
+
+function resetSim(th0=0.08) {
+  if(sim.alive || sim.balTime>0.5) {
+    const best = sim.mode==='LQR'?'lqrBest':'mpcBest';
+    if(sim.balTime>sim[best]) sim[best]=sim.balTime;
+  }
+  sim.s=[0,0,th0+(Math.random()-.5)*0.06,0];
+  sim.u=0; sim.alive=true; sim.time=0; sim.balTime=0;
+  sim.pushU=0; sim.pushTimer=0; sim.history=[];
+  sim.challengeTimer=3; sim.flash=0;
+  mpcU.fill(0);
+}
+
+// ════════════════════════════════════════════════════════════
+//  SIMULATION TICK
+// ════════════════════════════════════════════════════════════
+function tick(dt) {
+  if(!sim.alive) return;
+  const sv=sim.s;
+
+  // Controller
+  let u=0;
+  if(sim.mode==='LQR' && sim.lqrK) {
+    const K=sim.lqrK;
+    u=-(K[0]*sv[0]+K[1]*sv[1]+K[2]*sv[2]+K[3]*sv[3]);
+  } else if(sim.mode==='MPC') {
+    u=mpcStep(sv);
+  }
+
+  // User push
+  if(sim.pushTimer>0) { u+=sim.pushU; sim.pushTimer-=dt; }
+
+  // Challenge mode
+  if(sim.challenge) {
+    sim.challengeTimer-=dt;
+    if(sim.challengeTimer<=0) {
+      sim.pushU=P.pushMag*(Math.random()>.5?1:-1)*(0.8+Math.random());
+      sim.pushTimer=0.3;
+      sim.flash=1.0;
+      sim.challengeTimer=1.8+Math.random()*2.5;
+    }
+  }
+  sim.flash=Math.max(0,sim.flash-dt*4);
+
+  u=Math.max(-P.Umax*1.5,Math.min(P.Umax*1.5,u));
+  sim.u=u;
+
+  // Integrate
+  const steps=Math.max(1,Math.round(dt/P.dtInner));
+  const dts=dt/steps;
+  let s=sim.s;
+  for(let i=0;i<steps;i++) {
+    s=rk4(s,u,dts);
+    // Soft wall bounce
+    const ex=Math.abs(s[0])-P.trackLen;
+    if(ex>0) { s[1]-=Math.sign(s[0])*ex*60*dts; s[0]=Math.max(-P.trackLen,Math.min(P.trackLen,s[0])); }
+  }
+  if(s.some(v=>!isFinite(v))) { sim.alive=false; return; }
+  sim.s=s; sim.time+=dt;
+
+  // Failure
+  if(Math.abs(s[2])>Math.PI*.65) {
+    sim.alive=false;
+    const best=sim.mode==='LQR'?'lqrBest':'mpcBest';
+    if(sim.balTime>sim[best]) sim[best]=sim.balTime;
+    return;
+  }
+  sim.balTime+=dt;
+
+  // History (for plots)
+  sim.history.push({th:s[2],thd:s[3],t:sim.time});
+  if(sim.history.length>sim.maxHist) sim.history.shift();
+}
+
+// ════════════════════════════════════════════════════════════
+//  RENDERING
+// ════════════════════════════════════════════════════════════
+const COL = {
+  bg:'#020208', panel:'rgba(5,10,22,0.92)', panelBorder:'rgba(40,80,130,0.55)',
+  text:'rgba(170,210,230,0.95)', dim:'rgba(80,130,160,0.7)',
+  lqr:'#00ff88', mpc:'#00d4ff', push:'#ffaa20', danger:'#ff3355',
+  railTop:'#5a7080', railBot:'#2a3840',
+  cartTop:'#2a3f6a', cartBot:'#141e34', cartEdge:'#4488cc',
+};
+
+function poleColor() { return sim.mode==='LQR'?COL.lqr:COL.mpc; }
+
+function hexToRgb(h) {
+  return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+}
+
+function blendColor(hex, danger) {
+  const [r,g,b]=hexToRgb(hex);
+  return `rgb(${Math.round(r*(1-danger)+255*danger)},${Math.round(g*(1-danger))},${Math.round(b*(1-danger))})`;
+}
+
+// ── BACKGROUND ─────────────────────────────────────────────
+function drawBg() {
+  ctx.fillStyle=COL.bg; ctx.fillRect(0,0,W,H);
+  // Radial ambient
+  const rg=ctx.createRadialGradient(SX,SY,0,SX,SY,Math.max(W,H)*.75);
+  rg.addColorStop(0,'rgba(10,22,44,0.4)');
+  rg.addColorStop(1,'rgba(0,0,10,0.8)');
+  ctx.fillStyle=rg; ctx.fillRect(0,0,W,H);
+  // Grid
+  const gs=SC*.5;
+  ctx.strokeStyle='rgba(20,60,40,0.07)'; ctx.lineWidth=1;
+  for(let x=SX%gs;x<W;x+=gs){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=SY%gs;y<H;y+=gs){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  // Challenge flash
+  if(sim.flash>0) {
+    ctx.fillStyle=`rgba(255,180,0,${sim.flash*0.05})`;
+    ctx.fillRect(0,0,W,H);
+  }
+}
+
+// ── TRACK ──────────────────────────────────────────────────
+function drawTrack() {
+  const tw=P.trackLen*SC, lx=SX-tw, rx=SX+tw, ty=SY, th=10;
+  ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillRect(lx,ty+th+3,rx-lx,8);
+  const tg=ctx.createLinearGradient(0,ty-3,0,ty+th+4);
+  tg.addColorStop(0,COL.railTop); tg.addColorStop(.3,'#6a8090'); tg.addColorStop(1,COL.railBot);
+  ctx.fillStyle=tg; ctx.fillRect(lx,ty-3,rx-lx,th+6);
+  ctx.fillStyle='rgba(200,230,255,0.1)'; ctx.fillRect(lx,ty-3,rx-lx,2);
+  // Center line
+  ctx.strokeStyle='rgba(60,140,90,0.25)'; ctx.lineWidth=1;
+  ctx.setLineDash([5,5]);
+  ctx.beginPath(); ctx.moveTo(SX,ty-40); ctx.lineTo(SX,ty+th+30); ctx.stroke();
+  ctx.setLineDash([]);
+  // Ticks
+  ctx.lineWidth=1;
+  for(let mx=-P.trackLen;mx<=P.trackLen+.01;mx+=.5) {
+    const sx=SX+mx*SC, tl=Number.isInteger(mx)?10:6;
+    ctx.strokeStyle='rgba(100,160,180,0.4)';
+    ctx.beginPath(); ctx.moveTo(sx,ty+th); ctx.lineTo(sx,ty+th+tl); ctx.stroke();
+    if(Number.isInteger(mx)&&mx!==0) {
+      ctx.font='10px JetBrains Mono,monospace';
+      ctx.fillStyle='rgba(80,130,150,0.45)'; ctx.textAlign='center';
+      ctx.fillText(mx+'m',sx,ty+th+23);
+    }
+  }
+  ctx.textAlign='left';
+  // End stops
+  for(const ex of [lx-4,rx-4]) {
+    const sg=ctx.createLinearGradient(0,ty-28,0,ty+th+18);
+    sg.addColorStop(0,'#cc2233'); sg.addColorStop(1,'#881122');
+    ctx.fillStyle=sg; ctx.fillRect(ex,ty-28,9,th+44);
+    ctx.fillStyle='#ff4455'; ctx.fillRect(ex+1,ty-26,7,6);
+    ctx.font='bold 9px JetBrains Mono,monospace'; ctx.fillStyle='#ff4455';
+    ctx.textAlign='center'; ctx.fillText('LIMIT',ex+4,ty-32);
+  }
+  ctx.textAlign='left';
+}
+
+// ── CART ───────────────────────────────────────────────────
+function drawCart(x) {
+  const [sx,sy]=ws(x,0);
+  const cw=SC*.3, ch=SC*.17, wr=SC*.067;
+  // Shadow
+  ctx.fillStyle='rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.ellipse(sx+3,sy+ch+wr+4,cw*.8,5,0,0,Math.PI*2); ctx.fill();
+  // Body
+  const bg=ctx.createLinearGradient(sx-cw,sy-ch,sx+cw,sy+ch);
+  bg.addColorStop(0,COL.cartTop); bg.addColorStop(.5,'#223060'); bg.addColorStop(1,COL.cartBot);
+  ctx.fillStyle=bg; ctx.beginPath(); ctx.roundRect(sx-cw,sy-ch,cw*2,ch*2,8); ctx.fill();
+  ctx.strokeStyle=COL.cartEdge; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.roundRect(sx-cw,sy-ch,cw*2,ch*2,8); ctx.stroke();
+  // Top glint
+  ctx.fillStyle='rgba(100,160,255,0.1)';
+  ctx.beginPath(); ctx.roundRect(sx-cw+4,sy-ch+4,cw*2-8,ch*.55,3); ctx.fill();
+  // Mode LED
+  const pc=poleColor();
+  ctx.shadowColor=pc; ctx.shadowBlur=14;
+  ctx.fillStyle=pc;
+  ctx.beginPath(); ctx.arc(sx,sy-ch*.3,5,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0;
+  // Pivot base
+  ctx.fillStyle='#1e2e50'; ctx.beginPath(); ctx.arc(sx,sy-ch,11,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle=COL.cartEdge; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(sx,sy-ch,11,0,Math.PI*2); ctx.stroke();
+  // Wheels
+  for(const wx of [sx-cw*.52,sx+cw*.52]) {
+    const wy=sy+ch-2;
+    ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.arc(wx+2,wy+2,wr,0,Math.PI*2); ctx.fill();
+    const wg=ctx.createRadialGradient(wx-wr*.3,wy-wr*.3,1,wx,wy,wr);
+    wg.addColorStop(0,'#606890'); wg.addColorStop(1,'#1e2640');
+    ctx.fillStyle=wg; ctx.beginPath(); ctx.arc(wx,wy,wr,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#304890'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.arc(wx,wy,wr,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle='#90a0c0'; ctx.beginPath(); ctx.arc(wx,wy,wr*.25,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#3a58a0'; ctx.lineWidth=.8;
+    for(let a=0;a<3;a++) {
+      const ang=a*Math.PI*2/3;
+      ctx.beginPath(); ctx.moveTo(wx,wy); ctx.lineTo(wx+Math.cos(ang)*wr*.82,wy+Math.sin(ang)*wr*.82); ctx.stroke();
+    }
+  }
+}
+
+// ── POLE ───────────────────────────────────────────────────
+function drawPole(x, th) {
+  const [sx,sy]=ws(x,0);
+  const pivX=sx, pivY=sy-SC*.17;
+  const pLen=P.L*2*SC;
+  const tx=pivX+Math.sin(th)*pLen;
+  const ty=pivY-Math.cos(th)*pLen;
+  const danger=Math.min(1,Math.abs(th)/(Math.PI*.55));
+  const col=blendColor(poleColor(),danger);
+
+  // Pole glow layers
+  const glows=[{w:24,a:.04},{w:12,a:.09},{w:6,a:.18},{w:2.5,a:1}];
+  const [r,g,b]=hexToRgb(poleColor());
+  for(const {w,a} of glows) {
+    const rd=Math.round(r*(1-danger)+255*danger);
+    const gd=Math.round(g*(1-danger));
+    const bd=Math.round(b*(1-danger));
+    ctx.strokeStyle=a<1?`rgba(${rd},${gd},${bd},${a})`:col;
+    ctx.lineWidth=w; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(pivX,pivY); ctx.lineTo(tx,ty); ctx.stroke();
+  }
+  // Pivot
+  const pg=ctx.createRadialGradient(pivX,pivY,0,pivX,pivY,10);
+  pg.addColorStop(0,'#e0f0ff'); pg.addColorStop(1,'#304878');
+  ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(pivX,pivY,9,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle=COL.cartEdge; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(pivX,pivY,9,0,Math.PI*2); ctx.stroke();
+  // Bob glow
+  const br=SC*.068;
+  const bobGlows=[{s:4,.5:0},{s:2.8,.5:0},{s:1.6,.5:0},{s:1,full:true}];
+  for(let i=0;i<4;i++) {
+    const scales=[4,2.8,1.6,1], alphas=[.06,.11,.28,.9];
+    const sc=scales[i],al=alphas[i];
+    const [rd,gd,bd]=hexToRgb(poleColor());
+    const rr=Math.round(rd*(1-danger)+255*danger);
+    const gg=Math.round(gd*(1-danger));
+    const bb=Math.round(bd*(1-danger));
+    ctx.fillStyle=i<3?`rgba(${rr},${gg},${bb},${al})`:col;
+    ctx.beginPath(); ctx.arc(tx,ty,br*sc,0,Math.PI*2); ctx.fill();
+  }
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(tx,ty,br*.32,0,Math.PI*2); ctx.fill();
+}
+
+// ── MPC GHOST TRAJECTORY ──────────────────────────────────
+function drawMPCGhost() {
+  const traj=mpcPredict(sim.s);
+  ctx.lineCap='round';
+  for(let k=1;k<traj.length;k++) {
+    const al=Math.pow(1-k/traj.length,1.4)*.38;
+    const {x,th}=traj[k];
+    const [sx,sy]=ws(x,0);
+    const pLen=P.L*2*SC;
+    const tx=sx+Math.sin(th)*pLen, ty=sy-SC*.17-Math.cos(th)*pLen;
+    ctx.strokeStyle=`rgba(0,200,255,${al})`; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(sx,sy-SC*.17); ctx.lineTo(tx,ty); ctx.stroke();
+    ctx.fillStyle=`rgba(0,200,255,${al*2.5})`;
+    ctx.beginPath(); ctx.arc(tx,ty,4,0,Math.PI*2); ctx.fill();
+  }
+}
+
+// ── FORCE ARROW ───────────────────────────────────────────
+function drawForce() {
+  const u=sim.u; if(Math.abs(u)<0.5) return;
+  const [sx,sy]=ws(sim.s[0],0);
+  const dir=Math.sign(u), mag=Math.min(1,Math.abs(u)/P.Umax);
+  const len=SC*.52*mag, ay=sy-SC*.08;
+  const sx0=sx-dir*SC*.2, ex=sx0+dir*len;
+  const al=Math.min(.95,.4+mag*.6);
+  ctx.strokeStyle=`rgba(255,170,20,${al})`; ctx.lineWidth=3; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(sx0,ay); ctx.lineTo(ex-dir*12,ay); ctx.stroke();
+  ctx.fillStyle=`rgba(255,170,20,${al})`;
+  ctx.beginPath(); ctx.moveTo(ex,ay); ctx.lineTo(ex-dir*14,ay-7); ctx.lineTo(ex-dir*14,ay+7); ctx.closePath(); ctx.fill();
+  ctx.font='11px JetBrains Mono,monospace'; ctx.fillStyle=`rgba(255,210,100,${al})`;
+  ctx.textAlign=dir>0?'right':'left';
+  ctx.fillText(u.toFixed(1)+'N',ex-dir*18,ay-10); ctx.textAlign='left';
+}
+
+// ── TOP BAR ───────────────────────────────────────────────
+function drawTopBar() {
+  ctx.font='bold 20px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(200,230,255,0.92)';
+  ctx.fillText('INVERTED PENDULUM',20,34);
+  ctx.font='11px JetBrains Mono,monospace'; ctx.fillStyle=COL.dim;
+  ctx.fillText('CONTROL THEORY DEMO  |  L = LQR  M = MPC  ← → = PUSH  C = CHALLENGE',20,52);
+  ctx.strokeStyle='rgba(40,80,130,0.45)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(20,59); ctx.lineTo(W-20,59); ctx.stroke();
+}
+
+// ── STATE PANEL ──────────────────────────────────────────
+function drawStatePanel() {
+  const px=18,py=70,pw=205,ph=143;
+  panelBg(px-6,py-6,pw+12,ph+12,8);
+  const rows=[
+    ['θ',(sim.s[2]*180/Math.PI).toFixed(2)+'°', Math.abs(sim.s[2])>.3?'#ff9966':'#88ffcc'],
+    ['θ̇',sim.s[3].toFixed(2)+'r/s','#e0eeff'],
+    ['x', sim.s[0].toFixed(3)+'m', Math.abs(sim.s[0])>2?'#ff9966':'#e0eeff'],
+    ['ẋ', sim.s[1].toFixed(3)+'m/s','#e0eeff'],
+    ['u', sim.u.toFixed(2)+'N', sim.u>0?'#ffcc88':'#88ccff'],
+    ['t', sim.balTime.toFixed(2)+'s', '#ffdd44'],
+  ];
+  ctx.font='12px JetBrains Mono,monospace';
+  rows.forEach(([lbl,val,col],i) => {
+    const ey=py+i*22;
+    ctx.fillStyle=COL.dim; ctx.fillText(lbl+':', px, ey);
+    ctx.fillStyle=col; ctx.fillText(val, px+34, ey);
+  });
+}
+
+// ── BUTTONS ───────────────────────────────────────────────
+function drawButtons() {
+  modeBtn('LQR', W-298, 15, sim.mode==='LQR');
+  modeBtn('MPC', W-198, 15, sim.mode==='MPC');
+  actionBtn('↺ RESTART', W-104, 15, '#1a2a3a','#3060a0','restart',88);
+  actionBtn(sim.challenge?'⚡ CHALLENGE ON':'⚡ CHALLENGE', W-298, 58,
+    sim.challenge?'#1a3008':'#0e1810', sim.challenge?'#88cc44':'#2a4020','challenge',sim.challenge?150:130);
+  // Best scores
+  ctx.font='11px JetBrains Mono,monospace'; ctx.textAlign='right';
+  ctx.fillStyle='rgba(0,255,136,0.5)'; ctx.fillText('LQR best: '+sim.lqrBest.toFixed(2)+'s', W-20, 118);
+  ctx.fillStyle='rgba(0,212,255,0.5)'; ctx.fillText('MPC best: '+sim.mpcBest.toFixed(2)+'s', W-20, 136);
+  ctx.textAlign='left';
+}
+
+function modeBtn(label, x, y, active) {
+  const bw=90,bh=36;
+  const bg=active?(label==='LQR'?'rgba(0,70,44,0.9)':'rgba(0,55,75,0.9)'):'rgba(12,16,30,0.85)';
+  const bc=active?(label==='LQR'?COL.lqr:COL.mpc):COL.panelBorder;
+  ctx.fillStyle=bg; ctx.beginPath(); ctx.roundRect(x,y,bw,bh,6); ctx.fill();
+  ctx.strokeStyle=bc; ctx.lineWidth=active?2:1;
+  ctx.beginPath(); ctx.roundRect(x,y,bw,bh,6); ctx.stroke();
+  if(active){ctx.shadowColor=bc; ctx.shadowBlur=10;}
+  ctx.font='bold 14px JetBrains Mono,monospace';
+  ctx.fillStyle=active?(label==='LQR'?COL.lqr:COL.mpc):COL.dim;
+  ctx.textAlign='center'; ctx.fillText(label,x+bw/2,y+bh/2+5);
+  ctx.shadowBlur=0; ctx.textAlign='left';
+  BTNS[label]={x,y,w:bw,h:bh};
+}
+
+function actionBtn(label, x, y, bg, border, id, w=90) {
+  const bh=30;
+  ctx.fillStyle=bg; ctx.beginPath(); ctx.roundRect(x,y,w,bh,5); ctx.fill();
+  ctx.strokeStyle=border; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(x,y,w,bh,5); ctx.stroke();
+  ctx.font='12px JetBrains Mono,monospace'; ctx.fillStyle=COL.text;
+  ctx.textAlign='center'; ctx.fillText(label,x+w/2,y+bh/2+4);
+  ctx.textAlign='left'; BTNS[id]={x,y,w,h:bh};
+}
+
+// ── ANGLE HISTORY PLOT ────────────────────────────────────
+function drawAnglePlot() {
+  const pw=310,ph=95,px=SX-pw/2,py=H-ph-48;
+  panelBg(px,py,pw,ph,8);
+  ctx.font='11px JetBrains Mono,monospace'; ctx.fillStyle=COL.dim;
+  ctx.textAlign='center'; ctx.fillText('ANGLE θ vs TIME', px+pw/2, py+14);
+  ctx.textAlign='left';
+  const L=px+14,R=px+pw-14,T=py+22,B=py+ph-12;
+  const zy=(T+B)/2, pW=R-L, pH=B-T;
+  const maxA=Math.PI*.65;
+  ctx.fillStyle='rgba(255,40,60,0.06)';
+  const dz=(Math.PI*.3/maxA)*(pH/2);
+  ctx.fillRect(L,T,pW,pH/2-dz); ctx.fillRect(L,T+pH/2+dz,pW,pH/2-dz);
+  ctx.strokeStyle='rgba(50,120,70,0.35)'; ctx.lineWidth=1;
+  ctx.setLineDash([3,4]); ctx.beginPath(); ctx.moveTo(L,zy); ctx.lineTo(R,zy); ctx.stroke();
+  ctx.setLineDash([]);
+  const hist=sim.history;
+  if(hist.length>2) {
+    ctx.beginPath();
+    hist.forEach(({th},i)=>{
+      const hx=L+(i/sim.maxHist)*pW, hy=zy-(th/maxA)*(pH*.5);
+      i===0?ctx.moveTo(hx,hy):ctx.lineTo(hx,hy);
+    });
+    ctx.strokeStyle=poleColor(); ctx.lineWidth=1.5; ctx.globalAlpha=.8; ctx.stroke(); ctx.globalAlpha=1;
+  }
+  ctx.font='9px JetBrains Mono,monospace'; ctx.fillStyle='rgba(70,120,90,0.5)';
+  ctx.textAlign='right';
+  ctx.fillText('+90°',L-2,T+8); ctx.fillText('0',L-2,zy+4); ctx.fillText('-90°',L-2,B+2);
+  ctx.textAlign='left';
+}
+
+// ── PHASE PORTRAIT ────────────────────────────────────────
+function drawPhasePortrait() {
+  const pw=175,ph=150,px=W-pw-18,py=H-ph-48;
+  panelBg(px,py,pw,ph,8);
+  ctx.font='11px JetBrains Mono,monospace'; ctx.fillStyle=COL.dim;
+  ctx.textAlign='center'; ctx.fillText('PHASE: θ vs θ̇',px+pw/2,py+14);
+  ctx.textAlign='left';
+  const ocx=px+pw/2, ocy=py+ph*.56;
+  const sX=(pw*.43)/(Math.PI/2), sY=(ph*.4)/7;
+  ctx.strokeStyle='rgba(50,110,70,0.3)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(px+10,ocy); ctx.lineTo(px+pw-10,ocy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ocx,py+18); ctx.lineTo(ocx,py+ph-10); ctx.stroke();
+  ctx.font='9px JetBrains Mono,monospace'; ctx.fillStyle='rgba(50,110,70,0.5)';
+  ctx.textAlign='center'; ctx.fillText('θ →',px+pw-18,ocy-4);
+  ctx.textAlign='right'; ctx.fillText('θ̇',ocx-4,py+22);
+  ctx.textAlign='left';
+  // History trail
+  const hist=sim.history;
+  if(hist.length>2) {
+    ctx.beginPath();
+    hist.forEach(({th,thd},i)=>{
+      const hx=ocx+th*sX, hy=ocy-thd*sY;
+      i===0?ctx.moveTo(hx,hy):ctx.lineTo(hx,hy);
+    });
+    ctx.strokeStyle=poleColor(); ctx.lineWidth=1; ctx.globalAlpha=.45; ctx.stroke(); ctx.globalAlpha=1;
+  }
+  // Current dot
+  const dotX=ocx+sim.s[2]*sX, dotY=ocy-sim.s[3]*sY;
+  ctx.shadowColor=poleColor(); ctx.shadowBlur=10;
+  ctx.fillStyle=poleColor(); ctx.beginPath(); ctx.arc(dotX,dotY,5,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0;
+}
+
+// ── CONTROLLER INFO PANEL ────────────────────────────────
+function drawInfoPanel() {
+  const px=W-250,py=155,pw=235,ph=sim.mode==='LQR'?115:125;
+  panelBg(px,py,pw,ph,8);
+  ctx.font='bold 12px JetBrains Mono,monospace';
+  ctx.fillStyle=poleColor();
+  ctx.fillText(sim.mode==='LQR'?'▶ LQR CONTROLLER':'▶ MPC CONTROLLER', px+10, py+18);
+  ctx.font='10px JetBrains Mono,monospace'; ctx.fillStyle=COL.dim;
+  if(sim.mode==='LQR') {
+    ctx.fillText('Method: Algebraic Riccati Eq.',px+10,py+38);
+    ctx.fillText('Policy: u = −Kx  (linear)',px+10,py+54);
+    ctx.fillText('Online cost: O(1)',px+10,py+70);
+    if(sim.lqrK) {
+      const K=sim.lqrK;
+      ctx.fillStyle='rgba(140,200,160,0.7)';
+      ctx.fillText(`K=[${K[0].toFixed(1)}, ${K[1].toFixed(1)},`,px+10,py+88);
+      ctx.fillText(`   ${K[2].toFixed(1)}, ${K[3].toFixed(1)}]`,px+10,py+104);
+    }
+  } else {
+    ctx.fillText('Method: Gradient-descent shooting',px+10,py+38);
+    ctx.fillText(`Horizon: N=${P.Nh} × dt=${P.dtMpc}s`,px+10,py+54);
+    ctx.fillText(`Iters/frame: ${P.Ni}`,px+10,py+70);
+    ctx.fillText('Online cost: O(N²·Ni)',px+10,py+86);
+    ctx.fillText('Shows predicted trajectory ↑',px+10,py+102);
+    ctx.fillStyle='rgba(0,200,255,0.5)';
+    ctx.fillText('(ghost = MPC horizon rollout)',px+10,py+116);
+  }
+}
+
+// ── GAME OVER SCREEN ──────────────────────────────────────
+function drawGameOver() {
+  ctx.fillStyle='rgba(0,0,12,0.78)'; ctx.fillRect(0,0,W,H);
+  const cx2=SX,cy2=H/2-10,pw=430,ph=230;
+  ctx.fillStyle='rgba(6,10,24,0.97)'; ctx.strokeStyle='rgba(255,60,80,0.55)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.roundRect(cx2-pw/2,cy2-ph/2,pw,ph,14); ctx.fill(); ctx.stroke();
+  ctx.font='bold 46px JetBrains Mono,monospace';
+  ctx.textAlign='center'; ctx.shadowColor='#ff3355'; ctx.shadowBlur=22;
+  ctx.fillStyle='#ff3355'; ctx.fillText('POLE FELL',cx2,cy2-ph/2+62);
+  ctx.shadowBlur=0;
+  ctx.font='18px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(210,230,255,0.85)';
+  ctx.fillText(`${sim.mode} held it for ${sim.balTime.toFixed(2)}s`,cx2,cy2-ph/2+104);
+  const best=sim.mode==='LQR'?sim.lqrBest:sim.mpcBest;
+  ctx.font='14px JetBrains Mono,monospace'; ctx.fillStyle='#ffdd44';
+  ctx.fillText('Best: '+best.toFixed(2)+'s',cx2,cy2-ph/2+136);
+  ctx.font='13px JetBrains Mono,monospace'; ctx.fillStyle=COL.dim;
+  ctx.fillText('SPACE or click RESTART to go again',cx2,cy2-ph/2+175);
+  ctx.textAlign='left';
+}
+
+// ── UTILITY ───────────────────────────────────────────────
+function panelBg(x,y,w,h,r=6) {
+  ctx.fillStyle=COL.panel;
+  ctx.strokeStyle=COL.panelBorder; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.roundRect(x,y,w,h,r); ctx.fill(); ctx.stroke();
+}
+
+// ── MAIN DRAW ─────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  drawBg();
+  drawTrack();
+  if(sim.mode==='MPC') drawMPCGhost();
+  drawCart(sim.s[0]);
+  drawPole(sim.s[0],sim.s[2]);
+  drawForce();
+  drawTopBar();
+  drawStatePanel();
+  drawButtons();
+  drawInfoPanel();
+  drawAnglePlot();
+  drawPhasePortrait();
+  if(!sim.alive) drawGameOver();
+}
+
+// ════════════════════════════════════════════════════════════
+//  INPUT
+// ════════════════════════════════════════════════════════════
+let dragging=false;
+
+function tryBtnClick(mx,my) {
+  for(const [id,btn] of Object.entries(BTNS)) {
+    if(mx>=btn.x&&mx<=btn.x+btn.w&&my>=btn.y&&my<=btn.y+btn.h) {
+      if(id==='LQR')  { sim.mode='LQR'; mpcU.fill(0); resetSim(); }
+      else if(id==='MPC')  { sim.mode='MPC'; mpcU.fill(0); resetSim(); }
+      else if(id==='restart')   { resetSim(); }
+      else if(id==='challenge') { sim.challenge=!sim.challenge; sim.challengeTimer=2; }
+      return true;
+    }
+  }
+  return false;
+}
+
+function applyPush(mx) {
+  const cartX=SX+sim.s[0]*SC;
+  const dir=mx>cartX?1:-1;
+  const dist=Math.abs(mx-cartX), mag=Math.min(1,dist/(SC*1.4));
+  sim.pushU=dir*P.pushMag*(.5+mag*.6);
+  sim.pushTimer=P.pushDur;
+}
+
+cvs.addEventListener('mousedown',e=>{
+  if(tryBtnClick(e.clientX,e.clientY)) return;
+  if(!sim.alive){resetSim();return;}
+  dragging=true; applyPush(e.clientX);
+});
+cvs.addEventListener('mousemove',e=>{ if(dragging&&sim.alive) applyPush(e.clientX); });
+cvs.addEventListener('mouseup',()=>dragging=false);
+cvs.addEventListener('mouseleave',()=>dragging=false);
+cvs.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const t=e.touches[0];
+  if(tryBtnClick(t.clientX,t.clientY)) return;
+  if(!sim.alive){resetSim();return;}
+  dragging=true; applyPush(t.clientX);
+},{passive:false});
+cvs.addEventListener('touchmove',e=>{e.preventDefault();if(dragging&&sim.alive)applyPush(e.touches[0].clientX);},{passive:false});
+cvs.addEventListener('touchend',()=>dragging=false);
+
+document.addEventListener('keydown',e=>{
+  const key=e.code||e.key;
+  if(key==='Space'){e.preventDefault();if(!sim.alive)resetSim();}
+  if(key==='ArrowLeft'||key==='KeyA'){sim.pushU=-P.pushMag;sim.pushTimer=.22;}
+  if(key==='ArrowRight'||key==='KeyD'){sim.pushU=P.pushMag;sim.pushTimer=.22;}
+  if(key==='KeyL'){sim.mode='LQR';mpcU.fill(0);resetSim();}
+  if(key==='KeyM'){sim.mode='MPC';mpcU.fill(0);resetSim();}
+  if(key==='KeyC'){sim.challenge=!sim.challenge;sim.challengeTimer=2;}
+  if(key==='KeyR') resetSim();
+});
+
+// ════════════════════════════════════════════════════════════
+//  MAIN LOOP
+// ════════════════════════════════════════════════════════════
+let lastTs=null;
+function frame(ts) {
+  if(lastTs===null) lastTs=ts;
+  const dt=Math.min((ts-lastTs)/1000,.05);
+  lastTs=ts;
+  tick(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════
+console.log('Solving LQR (Riccati equation)...');
+sim.lqrK=solveLQR();
+resetSim();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

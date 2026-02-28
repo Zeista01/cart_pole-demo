@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inverted Pendulum — LQR vs MPC vs PID</title>
+  <meta name="description" content="Interactive cart-pole control demo comparing LQR and MPC controllers in real time. Push the pendulum with your mouse!">
+
+  <!-- Monospace font for the engineering aesthetic -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/tuner.css">
+
+  <!-- favicon (inline SVG data-URI so the repo stays self-contained) -->
+  <link rel="icon" href="assets/favicon.ico" type="image/x-icon">
+</head>
+<body>
+
+  <!-- Loading splash — hidden once LQR solve completes -->
+  <div id="loading">
+    <div class="spinner"></div>
+    SOLVING RICCATI EQUATION…
+  </div>
+
+  <!-- Full-screen simulation canvas -->
+  <canvas id="c"></canvas>
+
+  <!--
+    Script load order matters — each file extends the global scope
+    and depends on symbols defined in earlier files.
+
+    config.js      →  P  (parameters)
+    physics.js     →  deriv, rk4, getLinearizedMatrices
+    lqr.js         →  solveLQR, fmtEig   (needs physics.js)
+    mpc.js         →  mpcU, mpcStep, mpcPredict   (needs physics.js)
+    render.js      →  draw, cvs, ctx, COL, BTNS   (needs all above)
+    interaction.js →  event listeners   (needs render.js + main.js symbols)
+    main.js        →  sim, metrics, tick, frame, resetSim  (entry point)
+  -->
+  <script src="js/config.js"></script>
+  <script src="js/physics.js"></script>
+  <script src="js/lqr.js"></script>
+  <script src="js/mpc.js"></script>
+  <script src="js/pid.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/tuner.js"></script>
+  <script src="js/interaction.js"></script>
+  <script src="js/main.js"></script>
+
+  <!-- Hide loading overlay once main.js has initialised -->
+  <script>
+    // main.js calls resetSim() and starts the RAF loop synchronously,
+    // so by the time this inline script runs the canvas is live.
+    initTuner();
+    const overlay = document.getElementById('loading');
+    overlay.classList.add('hidden');
+    setTimeout(() => overlay.remove(), 500);
+  </script>
+
+</body>
+</html>
