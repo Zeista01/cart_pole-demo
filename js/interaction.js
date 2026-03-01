@@ -19,15 +19,26 @@ function tryBtnClick(mx, my) {
 }
 
 function handleBtn(id) {
-  if      (id === 'LQR')       { switchMode('LQR'); }
-  else if (id === 'MPC')       { switchMode('MPC'); }
-  else if (id === 'PID')       { switchMode('PID'); }
-  else if (id === 'restart')   { resetSim(); }
-  else if (id === 'challenge') { sim.challenge = !sim.challenge; sim.challengeTimer = 2; }
-  else if (id === 'dlLQR')     { downloadCSV('LQR'); }
-  else if (id === 'dlMPC')     { downloadCSV('MPC'); }
-  else if (id === 'dlPID')     { downloadCSV('PID'); }
-  else if (id === 'tune')      { toggleTuner(); }
+  if      (id === 'LQR')          { switchMode('LQR'); }
+  else if (id === 'MPC')          { switchMode('MPC'); }
+  else if (id === 'PID')          { switchMode('PID'); }
+  else if (id === 'restart')      { resetSim(); }
+  else if (id === 'challenge')    { sim.challenge = !sim.challenge; sim.challengeTimer = 2; }
+  else if (id === 'dlLQR')        { downloadCSV('LQR'); }
+  else if (id === 'dlMPC')        { downloadCSV('MPC'); }
+  else if (id === 'dlPID')        { downloadCSV('PID'); }
+  else if (id === 'tune')         { toggleTuner(); }
+  // Mobile tab switching
+  else if (id === 'tab_plot')     { mobileTab = 'plot'; }
+  else if (id === 'tab_state')    { mobileTab = 'state'; }
+  else if (id === 'tab_info')     { mobileTab = 'info'; }
+  // Mobile plot sub-tabs
+  else if (id === 'subPlot_angle')   { mobilePlotTab = 'angle'; }
+  else if (id === 'subPlot_control') { mobilePlotTab = 'control'; }
+  else if (id === 'subPlot_phase')   { mobilePlotTab = 'phase'; }
+  // Mobile push buttons
+  else if (id === 'pushLeft')     { sim.pushU = -P.pushMag; sim.pushTimer = P.pushDur; }
+  else if (id === 'pushRight')    { sim.pushU =  P.pushMag; sim.pushTimer = P.pushDur; }
 }
 
 function switchMode(mode) {
@@ -52,6 +63,8 @@ function applyPush(mx) {
 cvs.addEventListener('mousedown', e => {
   if (tryBtnClick(e.clientX, e.clientY)) return;
   if (!sim.alive) { resetSim(); return; }
+  // On mobile layout, only push if click is in simulation area
+  if (isMobile() && (e.clientY < _simTop || e.clientY > _simBot)) return;
   dragging = true;
   applyPush(e.clientX);
 });
@@ -65,6 +78,8 @@ cvs.addEventListener('touchstart', e => {
   const t = e.touches[0];
   if (tryBtnClick(t.clientX, t.clientY)) return;
   if (!sim.alive) { resetSim(); return; }
+  // Only push if touch is in simulation area (mobile) or anywhere (desktop)
+  if (isMobile() && (t.clientY < _simTop || t.clientY > _simBot)) return;
   dragging = true;
   applyPush(t.clientX);
 }, { passive: false });
@@ -95,11 +110,10 @@ document.addEventListener('keydown', e => {
     case 'KeyI': switchMode('PID'); break;
     case 'KeyC': sim.challenge = !sim.challenge; sim.challengeTimer = 2; break;
     case 'KeyR': resetSim(); break;
-    case 'KeyQ': downloadCSV('LQR'); break;   // Q → download LQR csv
-    case 'KeyP': downloadCSV('MPC'); break;   // P → download MPC csv
-    case 'KeyO': downloadCSV('PID'); break;   // O → download PID csv
-    case 'KeyT': toggleTuner(); break;        // T → toggle tuner panel
-    // Fine-tune Q weights on the fly (for LQR demos)
+    case 'KeyQ': downloadCSV('LQR'); break;
+    case 'KeyP': downloadCSV('MPC'); break;
+    case 'KeyO': downloadCSV('PID'); break;
+    case 'KeyT': toggleTuner(); break;
     case 'BracketLeft':  P.Qlqr[2] = Math.max(1,   P.Qlqr[2] - 2);  sim.lqrData = solveLQR(); break;
     case 'BracketRight': P.Qlqr[2] = Math.min(100, P.Qlqr[2] + 2);  sim.lqrData = solveLQR(); break;
   }

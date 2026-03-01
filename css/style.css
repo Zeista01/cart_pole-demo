@@ -57,3 +57,28 @@ html, body {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+/* ── Mobile touch enhancements ─────────────────────────────── */
+@media (max-width: 700px), (max-width: 960px) and (min-aspect-ratio: 9/16) {
+  html, body {
+    /* Prevent iOS bounce/overscroll */
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+  }
+
+  #c {
+    touch-action: none;
+    /* Prevent long-press context menu on canvas */
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  #loading {
+    font-size: 12px;
+  }
+
+  #loading .spinner {
+    width: 28px;
+    height: 28px;
+  }
+}
